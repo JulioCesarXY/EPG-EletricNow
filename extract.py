@@ -1,147 +1,107 @@
 import json
-import re
-import requests
-from datetime import datetime, timedelta, timezone
+import time
+from playwright.sync_api import sync_playwright
 
 
-def extract_all_electricnow_m3u8():
-    session = requests.Session()
+def intercept_electricnow():
+    print("[-] Iniciando navegador headless via Playwright...")
 
-    base_headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Origin": "https://www.electricnow.tv",
-        "Referer": "https://www.electricnow.tv/live-tv/",
-    }
-    session.headers.update(base_headers)
-
-    main_url = "https://www.electricnow.tv/live-tv/"
-    print("[-] Conectando à página principal do ElectricNOW...")
-
-    try:
-        main_res = session.get(main_url, timeout=15)
-        if main_res.status_code != 200:
-            print(
-                f"[!] Erro ao carregar a página principal: Status {main_res.status_code}"
-            )
-            return
-
-        jwt_match = re.search(
-            r'window\.EMBEDDED_JWT\s*=\s*"([^"]+)"', main_res.text
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(
+            viewport={"width": 1280, "height": 720},
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         )
-        company_match = re.search(
-            r'window\.COMPANY_ID\s*=\s*"([^"]+)"', main_res.text
-        )
+        page = context.new_page()
 
-        jwt_token = (
-            jwt_match.group(1)
-            if jwt_match
-            else "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJjb21wYW55X3N1YmRvbWFpbiI6ImVsZWN0cmljbm93IiwiZXhwIjoxNzgyMzA3NzMyLCJpYXQiOjE3ODIzMDQxMzJ9.LVxEvmnFTnE6MgoYMS9GvAmpyqD5BSErE11ZIv5iiFc"
-        )
-        company_id = (
-            company_match.group(1) if company_match else "68e42982e052240074037638"
-        )
+        m3u_lines = ["#EXTM3U"]
+        channels_map = {}
 
-        session.headers.update(
-            {
-                "Authorization": f"Bearer {jwt_token}",
-                "X-Company-Id": company_id,
-                "company_id": company_id,
-            }
-        )
-        print(f"[+] Autenticação injetada nos cabeçalhos.")
+        # 1. Função interna para interceptar as respostas de rede
+        def handle_response(response):
+            # Captura a lista de canais da EPG para pegar metadados (como logos e slugs)
+            if "/api/live/epg/" in response.url and response.status == 200:
+                try:
+                    data = response.json()
+                    if data.get("success") and "channels" in data:
+                        print(
+                            f"[+] EPG capturada! Mapeando {len(data['channels'])} canais..."
+                        )
+                        for chan in data["channels"]:
+                            v_id = chan.get("video_id")
+                            if v_id:
+                                channels_map[v_id] = {
+                                    "name": chan.get("name"),
+                                    "slug": chan.get("slug"),
+                                    "logo": chan.get("logo", ""),
+                                }
+                except Exception:
+                    pass
 
-    except Exception as e:
-        print(f"[!] Falha na conexão inicial: {e}")
-        return
-
-    now_utc = datetime.now(timezone.utc)
-    start_time = now_utc.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-    end_time = (now_utc + timedelta(hours=4)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-
-    epg_url = "https://www.electricnow.tv/api/live/epg/US"
-    epg_params = {"start_time": start_time, "end_time": end_time}
-
-    print("[-] Solicitando grade de canais ao vivo (EPG)...")
-
-    try:
-        epg_res = session.get(epg_url, params=epg_params, timeout=15)
-        print(f"[i] Status HTTP da EPG: {epg_res.status_code}")
-
-        if epg_res.status_code != 200:
-            print(f"[!] Falha na EPG. Resposta do servidor:\n{epg_res.text}")
-            return
-
-        epg_data = epg_res.json()
-        channels = epg_data.get("channels", [])
-        print(f"[+] {len(channels)} canais localizados na grade.")
-
-        m3u_content = "#EXTM3U\n"
-
-        for channel in channels:
-            channel_name = channel.get("name")
-            video_id = channel.get("video_id")
-            channel_slug = channel.get("slug")
-            channel_logo = channel.get("logo", "")
-
-            if not video_id:
-                continue
-
-            print(f"[-] Requisitando link do canal: {channel_name}...")
-
-            stream_url = (
-                f"https://www.electricnow.tv/api/live/stream/{video_id}"
-            )
-            stream_params = {"company_id": company_id, "device_type": "web"}
-
-            stream_res = session.get(
-                stream_url, params=stream_params, timeout=15
-            )
-
-            if stream_res.status_code == 200:
-                stream_data = stream_res.json()
-                m3u8_link = None
-
-                possible_keys = [
-                    "stream_url",
-                    "url",
-                    "hls_url",
-                    "manifest_url",
-                ]
-                for key in possible_keys:
-                    if key in stream_data:
-                        m3u8_link = stream_data[key]
-                        break
-                    elif (
-                        "data" in stream_data
-                        and isinstance(stream_data["data"], dict)
-                        and key in stream_data["data"]
-                    ):
-                        m3u8_link = stream_data["data"][key]
-                        break
-
-                if m3u8_link:
-                    m3u8_link_clean = m3u8_link.split("?")[0]
-                    m3u_content += f'#EXTINF:-1 tvg-id="{channel_slug}" tvg-name="{channel_name}" tvg-logo="{channel_logo}" group-title="ElectricNOW", {channel_name}\n'
-                    m3u_content += f"{m3u8_link_clean}\n"
-                    print(f"    [+] Link extraído com sucesso.")
-                else:
-                    print(
-                        f"    [!] Estrutura do JSON modificada: {stream_data}"
+            # Captura a URL final do streaming (.m3u8) retornada pela AWS/MediaTailor
+            if "/api/live/stream/" in response.url and response.status == 200:
+                try:
+                    stream_json = response.json()
+                    url_stream = stream_json.get("stream_url") or stream_json.get(
+                        "url"
                     )
-            else:
-                print(
-                    f"    [!] Erro na API do Stream {video_id}: {stream_res.status_code}"
-                )
 
-        with open("electricnow.m3u", "w", encoding="utf-8") as f:
-            f.write(m3u_content)
-        print("[+] Arquivo 'electricnow.m3u' gerado com sucesso!")
+                    if (
+                        not url_stream
+                        and "data" in stream_json
+                        and isinstance(stream_json["data"], dict)
+                    ):
+                        url_stream = stream_json["data"].get(
+                            "stream_url"
+                        ) or stream_json["data"].get("url")
 
-    except Exception as e:
-        print(f"[!] Erro de execução: {e}")
+                    if url_stream:
+                        m3u8_clean = url_stream.split("?")[0]
+                        v_id = response.url.split("/")[-1].split("?")[0]
+
+                        # Associa com os metadados da EPG se houver correspondência
+                        meta = channels_map.get(
+                            v_id,
+                            {
+                                "name": f"Canal {v_id[:6]}",
+                                "slug": v_id,
+                                "logo": "",
+                            },
+                        )
+
+                        print(f"    [+] Stream Link localizado -> {meta['name']}")
+
+                        entry = f'#EXTINF:-1 tvg-id="{meta["slug"]}" tvg-name="{meta["name"]}" tvg-logo="{meta["logo"]}" group-title="ElectricNOW", {meta["name"]}\n{m3u8_clean}'
+                        if entry not in m3u_lines:
+                            m3u_lines.append(entry)
+                except Exception:
+                    pass
+
+        # Ativa o listener de rede na página
+        page.on("response", handle_response)
+
+        # 2. Navega até a página principal onde o tráfego ocorre
+        print("[-] Acessando a plataforma e aguardando tráfego de rede...")
+        page.goto("https://www.electricnow.tv/live-tv/", wait_until="networkidle")
+
+        # Aguarda 15 segundos para que o player execute o carregamento em lote dos canais
+        print("[-] Aguardando o handshake dos streams internos...")
+        time.sleep(15)
+
+        # 3. Salva os resultados coletados
+        if len(m3u_lines) > 1:
+            m3u_content = "\n".join(m3u_lines) + "\n"
+            with open("electricnow.m3u", "w", encoding="utf-8") as f:
+                f.write(m3u_content)
+            print(
+                f"[+] Lista M3U gerada com sucesso contendo {len(m3u_lines)-1} canais!"
+            )
+        else:
+            print("[!] Nenhuma URL de stream foi interceptada.")
+
+        context.close()
+        browser.close()
 
 
 if __name__ == "__main__":
-    extract_all_electricnow_m3u8()
+    intercept_electricnow()
