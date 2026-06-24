@@ -1,58 +1,62 @@
-import json
-import time
-from playwright.sync_api import sync_playwright
+import re
+import requests
 
-def intercept_electricnow():
-    print("[-] Iniciando navegador headless...")
+def fetch_streams():
+    # 1. Obter um novo token diretamente do HTML
+    session = requests.Session()
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        "Referer": "https://www.electricnow.tv/live-tv/"
+    }
+    
+    print("[-] Obtendo token atualizado do servidor...")
+    response = session.get("https://www.electricnow.tv/live-tv/", headers=headers)
+    
+    # Regex para capturar o JWT no código fonte
+    token_match = re.search(r'window\.EMBEDDED_JWT\s*=\s*"([^"]+)"', response.text)
+    if not token_match:
+        print("[!] Não foi possível encontrar o token JWT no HTML.")
+        return
+    
+    token = token_match.group(1)
+    print("[+] Token capturado com sucesso.")
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        # Contexto que força a emulação de um dispositivo real
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-        )
-        page = context.new_page()
+    # 2. Configurar headers com o token fresco
+    headers.update({
+        "Authorization": f"Bearer {token}",
+        "x-access-token": token,
+        "Content-Type": "application/json"
+    })
 
-        # Armazena os links encontrados
-        stream_links = {}
+    # 3. Consultar a EPG com o token
+    epg_url = "https://www.electricnow.tv/api/live/epg/US"
+    # Adicionamos start_time e end_time como o site faz
+    params = {
+        "start_time": "2026-06-24T12:00:00.000Z",
+        "end_time": "2026-06-25T12:00:00.000Z"
+    }
+    
+    res = session.get(epg_url, headers=headers, params=params)
+    
+    if res.status_code != 200:
+        print(f"[!] Erro ao acessar EPG: {res.status_code} - {res.text}")
+        return
 
-        def handle_response(response):
-            # A API que retorna a URL do stream
-            if "/api/live/stream/" in response.url:
-                try:
-                    data = response.json()
-                    # Busca a URL dentro de possíveis campos de resposta da API
-                    stream_url = data.get("stream_url") or data.get("url")
-                    
-                    if stream_url:
-                        # Extrai o ID do canal da URL para identificar
-                        channel_id = response.url.split("/")[-1]
-                        if channel_id not in stream_links:
-                            stream_links[channel_id] = stream_url.split("?")[0]
-                            print(f"[+] Stream capturado para ID {channel_id}: {stream_links[channel_id]}")
-                except:
-                    pass
-
-        page.on("response", handle_response)
-
-        print("[-] Navegando para o site...")
-        # Aumentamos o tempo de espera para o carregamento do React
-        page.goto("https://www.electricnow.tv/live-tv/", wait_until="networkidle")
-
-        print("[-] Aguardando carregamento dinâmico dos assets...")
-        # Aumentamos o tempo de espera para o player inicializar automaticamente
-        time.sleep(30) 
-
-        if stream_links:
-            print(f"\n[+] Total de streams capturados: {len(stream_links)}")
-            with open("lista_canais.txt", "w") as f:
-                for cid, url in stream_links.items():
-                    f.write(f"{cid} | {url}\n")
-        else:
-            print("[!] Nenhum stream capturado. O site pode estar bloqueando automação ou usando WebSockets.")
-
-        context.close()
-        browser.close()
+    channels = res.json().get("channels", [])
+    
+    # 4. Loop para extrair streams
+    for ch in channels:
+        video_id = ch.get("video_id")
+        if video_id:
+            stream_url = f"https://www.electricnow.tv/api/live/stream/{video_id}"
+            stream_res = session.get(stream_url, headers=headers, params={"company_id": "68e42982e052240074037638"})
+            
+            if stream_res.status_code == 200:
+                data = stream_res.json()
+                final_link = data.get("stream_url") or data.get("url")
+                print(f"[+] {ch['name']}: {final_link}")
+            else:
+                print(f"[!] Erro ao capturar stream do canal {ch['name']}")
 
 if __name__ == "__main__":
-    intercept_electricnow()
+    fetch_streams()
