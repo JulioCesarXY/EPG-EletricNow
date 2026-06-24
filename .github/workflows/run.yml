@@ -21,9 +21,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Instalar Binários do Playwright
+      - name: Corrigir dependências do Ubuntu 24.04t64 e Instalar Chromium
         run: |
-          python -m playwright install chromium --with-deps
+          # Instalamos manualmente as dependências fundamentais do Chromium adaptadas para o Ubuntu 24.04
+          sudo apt-get update
+          sudo apt-get install -y libasound2t64 libgbm1 libnspr4 libnss3 libnss3-tools libv4l-0 libgstreamer-plugins-base1.0-0
+          
+          # Instala apenas o Chromium do Playwright sem forçar o script de dependências que quebra
+          python -m playwright install chromium
 
       - name: Executar Script Extrator
         run: python extract.py
