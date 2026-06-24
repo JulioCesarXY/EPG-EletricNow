@@ -1,52 +1,58 @@
+import json
 import time
 from playwright.sync_api import sync_playwright
 
-def run():
+def intercept_electricnow():
+    print("[-] Iniciando navegador headless...")
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
-        
-        # Lista para armazenar os links encontrados
-        streams = {}
+        # Contexto que força a emulação de um dispositivo real
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+        )
+        page = context.new_page()
 
-        # Monitora todas as requisições de rede que terminam em m3u8
-        def on_response(response):
-            if "m3u8" in response.url and "master" in response.url:
-                # O slug do canal geralmente está na URL ou podemos inferir
-                channel_name = response.url.split('/')[-4] # Ajuste conforme a estrutura
-                streams[channel_name] = response.url
-                print(f"[+] Stream capturado: {response.url}")
+        # Armazena os links encontrados
+        stream_links = {}
 
-        page.on("response", on_response)
+        def handle_response(response):
+            # A API que retorna a URL do stream
+            if "/api/live/stream/" in response.url:
+                try:
+                    data = response.json()
+                    # Busca a URL dentro de possíveis campos de resposta da API
+                    stream_url = data.get("stream_url") or data.get("url")
+                    
+                    if stream_url:
+                        # Extrai o ID do canal da URL para identificar
+                        channel_id = response.url.split("/")[-1]
+                        if channel_id not in stream_links:
+                            stream_links[channel_id] = stream_url.split("?")[0]
+                            print(f"[+] Stream capturado para ID {channel_id}: {stream_links[channel_id]}")
+                except:
+                    pass
 
-        print("[-] Acessando a página de canais...")
-        page.goto("https://www.electricnow.tv/live-tv/")
+        page.on("response", handle_response)
 
-        # A interação é necessária para o player carregar o stream
-        print("[-] Simulando seleção de canais...")
-        try:
-            # Espera o carregamento inicial
-            page.wait_for_load_state("networkidle")
-            # Clica no botão/link de canal (ajuste o seletor se necessário)
-            # Geralmente são elementos de lista ou links com a classe de canal
-            page.wait_for_selector(".channel-item", timeout=10000)
-            items = page.query_selector_all(".channel-item")
-            for item in items[:5]: # Clica nos primeiros 5 para forçar o carregamento
-                item.click()
-                time.sleep(3) 
-        except Exception as e:
-            print(f"[!] Erro na interação: {e}")
+        print("[-] Navegando para o site...")
+        # Aumentamos o tempo de espera para o carregamento do React
+        page.goto("https://www.electricnow.tv/live-tv/", wait_until="networkidle")
 
-        # Salva o resultado
-        if streams:
-            with open("streams.txt", "w") as f:
-                for name, url in streams.items():
-                    f.write(f"{name}: {url}\n")
-            print("[+] Lista de streams salva em streams.txt")
+        print("[-] Aguardando carregamento dinâmico dos assets...")
+        # Aumentamos o tempo de espera para o player inicializar automaticamente
+        time.sleep(30) 
+
+        if stream_links:
+            print(f"\n[+] Total de streams capturados: {len(stream_links)}")
+            with open("lista_canais.txt", "w") as f:
+                for cid, url in stream_links.items():
+                    f.write(f"{cid} | {url}\n")
         else:
-            print("[!] Nenhum stream foi capturado.")
-            
+            print("[!] Nenhum stream capturado. O site pode estar bloqueando automação ou usando WebSockets.")
+
+        context.close()
         browser.close()
 
 if __name__ == "__main__":
-    run()
+    intercept_electricnow()
